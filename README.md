@@ -21,6 +21,22 @@ OCI Puller 是一个高性能的 Docker 镜像拉取代理。它通过将 Docker
 
 配置文件部分参阅 [配置文件](config.md)
 
+强烈推荐使用 Docker Compose 部署
+
+```yaml
+services:
+  oci-puller:
+    image: ghcr.io/chisaato/oci-puller:main
+    restart: always
+    environment:
+      - LOG_LEVEL=debug
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - ./data:/data
+    ports:
+      - "9800:9800"
+```
+
 然后下面说说反向代理. 核心思路就是控制发送到 `oci-puller` 的 `Host` 头. 下面给出一些常见反向代理的配置片段.
 
 而且 Docker Registry 要求默认 TLS 访问,所以你得自己解决一下证书问题,当然配合 ACME 这很简单,这里就不展开了.
