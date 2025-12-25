@@ -1,0 +1,24 @@
+server:
+  addr: ":9800"
+  cache_dir: "./data/cache"
+
+log:
+  level: "debug"
+
+downloader:
+  workers: 4
+  chunk_size: "5MB"
+
+registries:
+  - id: "docker"
+    host: "docker-local.example.com"
+    urls:
+      - "https://registry-1.docker.io"
+  - id: "ghcr"
+    host: "ghcr-local.example.com"
+    urls:
+      - "https://ghcr.io"
+  - id: "lscr"
+    host: "lscr-local.example.com"
+    urls:
+      - "https://lscr.io"

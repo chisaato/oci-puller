@@ -1,0 +1,7 @@
+certs/
+dir/
+data/
+dist/
+.env
+letsencrypt/
+.idea/

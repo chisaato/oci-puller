@@ -1,0 +1,13 @@
+services:
+  oci-puller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - LOG_LEVEL=debug
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - ./data:/data
+    ports:
+      - "9800:9800"
