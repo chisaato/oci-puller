@@ -17,10 +17,17 @@ OCI Puller 是一个高性能的 Docker 镜像拉取代理。它通过将 Docker
 
 ## 配置指南
 
+> 这个工具强烈建议在局域网/本地环境中使用
+
 配置文件部分参阅 [配置文件](config.md)
 
-然后下面说说反向代理. 核心思路就是控制发送到 `oci-puller` 的 `Host` 头. 下面给出一些常见反向代理的配置片段.  
+然后下面说说反向代理. 核心思路就是控制发送到 `oci-puller` 的 `Host` 头. 下面给出一些常见反向代理的配置片段.
+
 而且 Docker Registry 要求默认 TLS 访问,所以你得自己解决一下证书问题,当然配合 ACME 这很简单,这里就不展开了.
+
+最后就是解析,既然是本地环境那各位选取自己喜欢的方法就行.
+
+> 你问我多个镜像站怎么办? 那不就是设置多个域名绑定的事
 
 ### Nginx
 
@@ -84,3 +91,7 @@ Docker 可以配置多个镜像站,可以将 `oci-puller` 提供的地址作为�
 	"registry-mirrors": ["https://docker.example.com", "https://xxxmirror.com"]
 }
 ```
+
+## 开源协议
+
+本项目采用 [GPLv3](LICENSE) 协议开源。
