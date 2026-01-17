@@ -5,3 +5,4 @@ dist/
 .env
 letsencrypt/
 .idea/
+oci-puller
