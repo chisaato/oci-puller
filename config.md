@@ -14,6 +14,10 @@ downloader:
   workers: 4
   chunk_size: "5MB"
 
+cache:
+  max_size: "10GB"
+  cleanup_interval: "5m"
+
 registries:
   - id: "docker"
     host: "docker-local.example.com"
@@ -78,3 +82,38 @@ registries:
 - `urls`: 镜像站的原始地址,可以有多个.
 
 当然考虑到实际情况,你大概率这里是不能用原始地址的,你要想办法自己找个访问顺畅的反代.
+
+## 缓存配置
+
+OCI Puller 现在支持自动缓存管理和定期清理功能。
+
+```yaml
+cache:
+  max_size: "10GB"
+  cleanup_interval: "5m"
+```
+
+### 缓存大小限制 (`max_size`)
+
+- **格式**: 支持 "GB", "MB", "KB", "B" 后缀
+- **默认值**: "10GB"
+- **说明**: 当缓存总大小超过此限制时，会自动清理最旧的项目
+
+### 清理间隔 (`cleanup_interval`)
+
+- **格式**: Go duration 格式（如 "5m", "1h", "30s"）
+- **默认值**: "5m" (5分钟)
+- **说明**: 后台垃圾回收运行的间隔
+
+### 缓存管理命令
+
+```bash
+# 查看缓存统计信息
+./oci-puller cache stats
+
+# 清理指定数量的最旧项目
+./oci-puller cache clean 10
+
+# 自动清理（使使用率降到90%以下）
+./oci-puller cache clean
+```

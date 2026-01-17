@@ -201,6 +201,40 @@ func (s *Store) GetPath(digest string) (string, error) {
 	return path, err
 }
 
+// GetTotalSize 返回当前缓存的总大小
+func (s *Store) GetTotalSize() (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var totalSize int64
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketBlobs)
+		return b.ForEach(func(k, v []byte) error {
+			var meta BlobMeta
+			if err := json.Unmarshal(v, &meta); err != nil {
+				return err
+			}
+			totalSize += meta.Size
+			return nil
+		})
+	})
+	return totalSize, err
+}
+
+// GetBlobCount 返回缓存中的Blob数量
+func (s *Store) GetBlobCount() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketBlobs)
+		count = b.Stats().KeyN
+		return nil
+	})
+	return count, err
+}
+
 func makeLRUKey(ts int64, digest string) []byte {
 	// 键 (Key): <时间戳_8字节><摘要_digest>
 	k := make([]byte, 8+len(digest))

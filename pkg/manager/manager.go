@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"oci-puller/pkg/config"
 	"oci-puller/pkg/coordinator"
 	"oci-puller/pkg/downloader"
 	"oci-puller/pkg/interval"
@@ -67,6 +68,61 @@ func NewManager(cacheDir string) *DownloadManager {
 	return mgr
 }
 
+// CacheStats 缓存统计信息
+type CacheStats struct {
+	TotalSize       int64   `json:"total_size"`
+	BlobCount       int     `json:"blob_count"`
+	MaxSize         int64   `json:"max_size"`
+	UsagePercent    float64 `json:"usage_percent"`
+	ActiveDownloads int     `json:"active_downloads"`
+}
+
+// GetCacheStats 返回缓存统计信息
+func (m *DownloadManager) GetCacheStats() (*CacheStats, error) {
+	stats := &CacheStats{}
+
+	// 获取配置的最大大小
+	cfg := config.GlobalConfig
+	maxSize, err := cfg.Cache.ParseMaxSize()
+	if err != nil {
+		maxSize = 10 * 1024 * 1024 * 1024 // 10GB 默认值
+	}
+	stats.MaxSize = maxSize
+
+	// 获取活跃下载数量
+	activeCount := 0
+	m.active.Range(func(key, value interface{}) bool {
+		activeCount++
+		return true
+	})
+	stats.ActiveDownloads = activeCount
+
+	// 如果没有存储系统，返回基本信息
+	if m.store == nil {
+		return stats, nil
+	}
+
+	// 获取总大小和项目数
+	totalSize, err := m.store.GetTotalSize()
+	if err != nil {
+		return nil, fmt.Errorf("获取缓存总大小失败: %w", err)
+	}
+	stats.TotalSize = totalSize
+
+	blobCount, err := m.store.GetBlobCount()
+	if err != nil {
+		return nil, fmt.Errorf("获取缓存项目数失败: %w", err)
+	}
+	stats.BlobCount = blobCount
+
+	// 计算使用百分比
+	if stats.MaxSize > 0 {
+		stats.UsagePercent = float64(stats.TotalSize) / float64(stats.MaxSize) * 100
+	}
+
+	return stats, nil
+}
+
 // Close 关闭底层存储
 func (m *DownloadManager) Close() error {
 	if m.store != nil {
@@ -75,29 +131,170 @@ func (m *DownloadManager) Close() error {
 	return nil
 }
 
+// CleanupCache 手动清理缓存，删除指定数量的最旧项目
+func (m *DownloadManager) CleanupCache(count int) error {
+	if m.store == nil {
+		return fmt.Errorf("缓存存储系统未初始化")
+	}
+
+	if count <= 0 {
+		return fmt.Errorf("清理数量必须大于0")
+	}
+
+	logger.S.Infow("开始手动缓存清理", "count", count)
+
+	evictedDigests, err := m.store.EvictOldest(count)
+	if err != nil {
+		return fmt.Errorf("从存储中驱逐项目失败: %w", err)
+	}
+
+	var freedSize int64
+	var actualDeleted int
+
+	// 删除实际的文件
+	for _, digest := range evictedDigests {
+		finalPath := m.getFinalPath(digest)
+		tempPath := m.getTempPath(digest)
+		metaPath := tempPath + ".meta"
+
+		// 获取文件大小用于统计
+		if info, err := os.Stat(finalPath); err == nil {
+			freedSize += info.Size()
+			actualDeleted++
+
+			// 删除文件
+			if err := os.Remove(finalPath); err != nil {
+				logger.S.Warnw("删除缓存文件失败", "path", finalPath, "error", err)
+			} else {
+				logger.S.Debugw("已删除缓存文件", "digest", digest, "path", finalPath)
+			}
+		}
+
+		// 清理可能的临时文件
+		os.Remove(tempPath)
+		os.Remove(metaPath)
+	}
+
+	logger.S.Infow("手动缓存清理完成",
+		"requested", count,
+		"actualDeleted", actualDeleted,
+		"freedSize", freedSize)
+
+	return nil
+}
+
 func (m *DownloadManager) backgroundGC() {
-	ticker := time.NewTicker(5 * time.Minute)
+	// 获取配置的清理间隔
+	cfg := config.GlobalConfig
+	interval, err := cfg.Cache.ParseCleanupInterval()
+	if err != nil {
+		logger.S.Warnw("解析清理间隔配置失败，使用默认值", "error", err)
+		interval = 5 * time.Minute
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// 是否增加最大容量配置？目前硬编码或使用简单的基于数量的逻辑
-	// 理想情况下应该检查磁盘使用情况
+	logger.S.Infow("启动后台垃圾回收", "interval", interval)
 
 	for range ticker.C {
-		// 详细逻辑占位符
-		// 目前可以实现基于数量的清理，例如保留最后 1000 项
-		// 或者检查 cacheDir 的磁盘占用情况 (du)
-
-		// 执行详细的垃圾回收
 		m.runGC()
 	}
 }
 
 func (m *DownloadManager) runGC() {
-	// 简单的 GC：如果超过 1000 项则清理（仅为示例，最好有大小限制）
-	// 由于我们尚未实现简单的数据库项计数或大小追踪，
-	// 目前先保留此钩子，或者执行简单的“如果磁盘占用 > 80% 则清理最旧的 10 项”
+	if m.store == nil {
+		return
+	}
 
-	// TODO: 可配置的 GC
+	// 获取配置
+	cfg := config.GlobalConfig
+	maxSize, err := cfg.Cache.ParseMaxSize()
+	if err != nil {
+		logger.S.Warnw("解析缓存最大大小配置失败，使用默认值", "error", err)
+		maxSize = 10 * 1024 * 1024 * 1024 // 10GB
+	}
+
+	// 获取当前缓存总大小
+	currentSize, err := m.store.GetTotalSize()
+	if err != nil {
+		logger.S.Warnw("获取缓存总大小失败", "error", err)
+		return
+	}
+
+	blobCount, err := m.store.GetBlobCount()
+	if err != nil {
+		logger.S.Warnw("获取缓存项目数失败", "error", err)
+		return
+	}
+
+	logger.S.Debugw("缓存状态检查",
+		"currentSize", currentSize,
+		"maxSize", maxSize,
+		"blobCount", blobCount,
+		"usagePercent", float64(currentSize)/float64(maxSize)*100)
+
+	// 如果缓存大小超过限制，开始清理
+	if currentSize > maxSize {
+		// 计算需要清理的空间
+		needToFree := currentSize - maxSize + (maxSize / 10) // 多清理10%以避免频繁GC
+		var freedSize int64
+		var evictedCount int
+
+		logger.S.Infow("开始缓存清理",
+			"needToFree", needToFree,
+			"currentSize", currentSize,
+			"maxSize", maxSize)
+
+		// 每次清理最多10个最旧的项目
+		for freedSize < needToFree {
+			const batchSize = 10
+			evictedDigests, err := m.store.EvictOldest(batchSize)
+			if err != nil {
+				logger.S.Warnw("清理缓存项目失败", "error", err)
+				break
+			}
+
+			if len(evictedDigests) == 0 {
+				// 没有更多项目可以清理
+				break
+			}
+
+			// 删除实际的文件
+			for _, digest := range evictedDigests {
+				finalPath := m.getFinalPath(digest)
+				tempPath := m.getTempPath(digest)
+				metaPath := tempPath + ".meta"
+
+				// 获取文件大小用于统计
+				if info, err := os.Stat(finalPath); err == nil {
+					freedSize += info.Size()
+					evictedCount++
+
+					// 删除文件
+					if err := os.Remove(finalPath); err != nil {
+						logger.S.Warnw("删除缓存文件失败", "path", finalPath, "error", err)
+					} else {
+						logger.S.Debugw("已删除缓存文件", "digest", digest, "path", finalPath)
+					}
+				}
+
+				// 清理可能的临时文件
+				os.Remove(tempPath)
+				os.Remove(metaPath)
+			}
+
+			// 如果清理的项目太少，可能需要更大的批次
+			if len(evictedDigests) < batchSize {
+				break
+			}
+		}
+
+		logger.S.Infow("缓存清理完成",
+			"freedSize", freedSize,
+			"evictedCount", evictedCount,
+			"newSize", currentSize-freedSize)
+	}
 }
 
 // GetBlobStream 获取 Blob 的读取流

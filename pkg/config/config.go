@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -12,6 +13,7 @@ type Config struct {
 	Server     ServerConfig     `mapstructure:"server"`
 	Log        LogConfig        `mapstructure:"log"`
 	Downloader DownloaderConfig `mapstructure:"downloader"`
+	Cache      CacheConfig      `mapstructure:"cache"`
 	Registries []RegistryConfig `mapstructure:"registries"`
 }
 
@@ -33,6 +35,49 @@ type RegistryConfig struct {
 	ID   string   `mapstructure:"id"`
 	Host string   `mapstructure:"host"`
 	URLs []string `mapstructure:"urls"`
+}
+
+type CacheConfig struct {
+	MaxSize         string `mapstructure:"max_size"`         // 最大缓存大小 (如 "10GB", "500MB")
+	CleanupInterval string `mapstructure:"cleanup_interval"` // 清理间隔 (如 "5m", "1h")
+}
+
+// ParseMaxSize 解析缓存最大大小配置
+func (c *CacheConfig) ParseMaxSize() (int64, error) {
+	s := strings.ToUpper(strings.TrimSpace(c.MaxSize))
+	if s == "" {
+		return 10 * 1024 * 1024 * 1024, nil // 默认 10GB
+	}
+
+	var multiplier int64 = 1
+	if strings.HasSuffix(s, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	} else if strings.HasSuffix(s, "MB") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	} else if strings.HasSuffix(s, "KB") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	} else if strings.HasSuffix(s, "B") {
+		s = strings.TrimSuffix(s, "B")
+	}
+
+	var val int64
+	_, err := fmt.Sscanf(s, "%d", &val)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cache max size format: %s", c.MaxSize)
+	}
+
+	return val * multiplier, nil
+}
+
+// ParseCleanupInterval 解析清理间隔配置
+func (c *CacheConfig) ParseCleanupInterval() (time.Duration, error) {
+	if c.CleanupInterval == "" {
+		return 5 * time.Minute, nil // 默认 5分钟
+	}
+	return time.ParseDuration(c.CleanupInterval)
 }
 
 // ParseChunkSize 解析 "10MB", "512KB" 等字符串为字节数
@@ -88,6 +133,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	if cfg.Cache.MaxSize == "" {
+		cfg.Cache.MaxSize = "10GB"
+	}
+	if cfg.Cache.CleanupInterval == "" {
+		cfg.Cache.CleanupInterval = "5m"
 	}
 
 	GlobalConfig = &cfg
