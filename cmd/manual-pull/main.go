@@ -16,7 +16,7 @@ import (
 
 const (
 	tokenURL = "https://ghcr.io/token?scope=repository:linuxserver/blender:pull&service=ghcr.io"
-	blobURL  = "https://lscr.example.com/v2/linuxserver/blender/blobs/sha256:6c0b2755985d478b37d48a090cb722f3c241c8331237337b3e62d070af0e4b70"
+	blobURL  = "https://lscr.scgit.top/v2/linuxserver/blender/blobs/sha256:6c0b2755985d478b37d48a090cb722f3c241c8331237337b3e62d070af0e4b70"
 	blobSize = 819903207
 )
 

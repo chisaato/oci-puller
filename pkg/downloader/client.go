@@ -1,6 +1,8 @@
 package downloader
 
 import (
+	"crypto/tls"
+	"net"
 	"net/http"
 	"time"
 )
@@ -10,15 +12,24 @@ import (
 func newClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			//TLSClientConfig: &tls.Config{
-			//	// 强制仅使用 HTTP/1.1
-			//	NextProtos: []string{"http/1.1"},
-			//},
-			// 禁用 HTTP/2
-			ForceAttemptHTTP2:   false,
-			IdleConnTimeout:     90 * time.Second,
+			// 1. 基础网络配置 (手动复刻 http.DefaultTransport 的默认值)
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+
+			// 2. HTTP/2 禁用配置
+			// 关键：设置 TLSNextProto 为非 nil 的空 map，彻底禁用 HTTP/2 自动升级
+			TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			ForceAttemptHTTP2: false,
+
+			// 3. 自定义连接池配置
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
 		},
 	}
 }

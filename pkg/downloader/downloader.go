@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"oci-puller/pkg/config"
 	"oci-puller/pkg/coordinator"
 	"oci-puller/pkg/logger"
 
@@ -36,21 +35,16 @@ type Downloader struct {
 
 // New 创建一个新的下载器
 func New(url string, f *os.File, c *coordinator.Coordinator, headers http.Header) *Downloader {
-	cfg := config.GlobalConfig
 
-	// 解析 ChunkSize
-	chunkSize, err := cfg.Downloader.ParseChunkSize()
-	if err != nil {
-		logger.S.Warnf("Invalid chunk size configuration: %v, using default 10MB", err)
-		chunkSize = 10 * 1024 * 1024
-	}
+	// 设置 ChunkSize 为 10M
+	chunkSize := 1024 * 1024 * 10
 
 	return &Downloader{
 		url:       url,
 		file:      f,
 		coord:     c,
-		chunkSize: chunkSize,
-		workers:   cfg.Downloader.Workers,
+		chunkSize: int64(chunkSize),
+		workers:   64,
 		headers:   headers,
 	}
 }
