@@ -31,7 +31,7 @@ COPY --from=builder /app/oci-puller /oci-puller
 # COPY config.yaml /etc/oci-puller/config.yaml
 
 # Expose port (adjust based on your config)
-EXPOSE 8080
+EXPOSE 9800
 
 
 ENTRYPOINT ["/oci-puller", "server"]

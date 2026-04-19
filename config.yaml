@@ -12,8 +12,10 @@ downloader:
 registries:
   - id: "docker"
     host: "docker-local.example.com"
+    # 同一 host 可配置多个上游 URL，当前按请求轮询，并在建立阶段失败时尝试后续 URL
     urls:
       - "https://registry-1.docker.io"
+      - "https://registry-docker-hub.edgecompute.app"
   - id: "ghcr"
     host: "ghcr-local.example.com"
     urls:

@@ -11,7 +11,7 @@ OCI Puller 是一个高性能的 Docker 镜像拉取代理。它通过将 Docker
 - **多线程拉取**: 突破单线程限制，充分利用带宽。
 - **智能缓存**: 避免重复下载，支持自动清理。
 - **流式响应**: 无需等待全部下载完成即可开始向客户端返回数据。
-- **多源负载均衡**: 自由配置镜像源，支持高可用。
+- **多上游调度**: 同一 Host 可配置多个上游 URL，当前支持请求级轮询与失败切换。
 - **自定义 Registry**: 不限制可以代理的 Registry,用户自行添加
 - **自定义域名**: 访问域名不做限制,用户自行选择反向代理
 
@@ -21,6 +21,13 @@ OCI Puller 是一个高性能的 Docker 镜像拉取代理。它通过将 Docker
 
 配置文件部分参阅 [配置文件](config.md)
 
+当前多上游能力边界如下:
+
+- 同一 `host` 下可配置多个 `urls`
+- 新请求会按轮询顺序选择首个上游
+- 当首个上游在请求建立阶段失败时，会在同一请求内继续尝试后续上游
+- 目前还不支持健康检查、加权分流、跨请求粘性等更完整的调度策略
+
 强烈推荐使用 Docker Compose 部署
 
 ```yaml
@@ -29,7 +36,7 @@ services:
     image: ghcr.io/chisaato/oci-puller:main
     restart: always
     environment:
-      - LOG_LEVEL=debug
+      - OCI_LOG_LEVEL=debug
     volumes:
       - ./config.yaml:/config.yaml:ro
       - ./data:/data
@@ -43,7 +50,7 @@ services:
 
 最后就是解析,既然是本地环境那各位选取自己喜欢的方法就行.
 
-> 你问我多个镜像站怎么办? 那不就是设置多个域名绑定的事
+> 你问我多个镜像站怎么办? 可以继续用多个域名分别映射不同 registry；如果同一个 registry 有多个可用上游，也可以在同一条 `registries.urls` 里配置多个 URL。
 
 ### Nginx
 
@@ -56,9 +63,9 @@ server {
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:9800;
         # 或者是在容器内使用域名访问
-        # proxy_pass http://oci-puller:8080;
+        # proxy_pass http://oci-puller:9800;
         proxy_set_header Host $host;
     }
 }
@@ -68,11 +75,11 @@ server {
 
 ```caddy
 docker.example.com {
-    reverse_proxy 127.0.0.1:8080 {
+    reverse_proxy 127.0.0.1:9800 {
         header_up Host {host}
     }
     # 或者是在容器内使用域名访问
-    # reverse_proxy oci-puller:8080 {
+    # reverse_proxy oci-puller:9800 {
     #     header_up Host {host}
     # }
 }
@@ -93,7 +100,7 @@ http:
       loadBalancer:
         servers:
           # 既然你都用 Traefik 我假定你大概率是在容器里跑的
-          - url: "http://oci-puller:8080"
+          - url: "http://oci-puller:9800"
 ```
 
 ## 使用方法

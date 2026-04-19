@@ -123,7 +123,7 @@ func Load() (*Config, error) {
 
 	// 设置默认值
 	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":7945"
+		cfg.Server.Addr = ":9800"
 	}
 	if cfg.Server.CacheDir == "" {
 		cfg.Server.CacheDir = "./data/cache"

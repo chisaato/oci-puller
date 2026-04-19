@@ -22,7 +22,8 @@ registries:
   - id: "docker"
     host: "docker-local.example.com"
     urls:
-      - "https://registry-1.docker.io"
+      - "https://mirror-a.example.com"
+      - "https://mirror-b.example.com"
   - id: "ghcr"
     host: "ghcr-local.example.com"
     urls:
@@ -74,14 +75,17 @@ registries:
   - id: "docker"
     host: "docker-local.example.com"
     urls:
-      - "https://registry-1.docker.io"
+      - "https://mirror-a.example.com"
+      - "https://mirror-b.example.com"
 ```
 
 - `id`: 镜像站的唯一标识符,用于在其他地方引用.
 - `host`: 当匹配到这个 Host 头的时候,使用加速地从下面的原始地址拉取
-- `urls`: 镜像站的原始地址,可以有多个.
+- `urls`: 镜像站的上游地址列表,可以有一个或多个. 当前同一 `host` 下会先按轮询选择首个 URL,如果该上游在请求建立阶段失败,会在同一请求内继续尝试后续 URL.
 
-当然考虑到实际情况,你大概率这里是不能用原始地址的,你要想办法自己找个访问顺畅的反代.
+上面这类配置表示同一个入口 Host 对应多个上游地址,当前行为是“请求级轮询 + 建立阶段失败切换”.
+
+当然考虑到实际情况,你大概率这里是不能用原始地址的,你要想办法自己找个访问顺畅的反代. 即便配置了多个反代地址,目前也还不包含健康检查、加权分流、跨请求粘性这类更完整的调度能力.
 
 ## 缓存配置
 

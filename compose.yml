@@ -6,7 +6,7 @@ services:
     image: ghcr.io/chisaato/oci-puller:main
     restart: always
     environment:
-      - LOG_LEVEL=debug
+      - OCI_LOG_LEVEL=debug
     volumes:
       - ./config.yaml:/config.yaml:ro
       - ./data:/data
