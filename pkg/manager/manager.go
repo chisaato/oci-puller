@@ -436,11 +436,32 @@ func (m *DownloadManager) startDownload(digest, url string, headers http.Header)
 
 	dl := downloader.New(url, f, coord, headers)
 
+	// 应用配置文件中的下载器参数（此前这里被硬编码值覆盖，config.yaml 中的
+	// workers/chunk_size/min_speed/stall_timeout 实际上从未生效）。
+	if cfg := config.GlobalConfig; cfg != nil {
+		if cfg.Downloader.Workers > 0 {
+			dl.SetWorkers(cfg.Downloader.Workers)
+		}
+		if chunkSize, err := cfg.Downloader.ParseChunkSize(); err == nil {
+			dl.SetChunkSize(chunkSize)
+		} else {
+			logger.S.Warnw("解析 chunk_size 配置失败，使用默认值", "error", err)
+		}
+		if minSpeed, err := cfg.Downloader.ParseMinSpeed(); err == nil {
+			dl.SetMinSpeed(minSpeed)
+		} else {
+			logger.S.Warnw("解析 min_speed 配置失败，使用默认值", "error", err)
+		}
+		if stallTimeout, err := cfg.Downloader.ParseStallTimeout(); err == nil {
+			dl.SetStallTimeout(stallTimeout)
+		} else {
+			logger.S.Warnw("解析 stall_timeout 配置失败，使用默认值", "error", err)
+		}
+	}
+
 	if !supportsRange {
 		// 别管,强制性用多线程拉
 		logger.S.Warnw("上游不支持 Range 请求，由于策略强制，仍将使用多线程下载", "url", url)
-		dl.SetWorkers(64)
-		dl.SetChunkSize(10 * 1024 * 1024)
 	}
 
 	// 4. 注册到 Active Map
