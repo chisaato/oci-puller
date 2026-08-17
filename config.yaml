@@ -8,6 +8,12 @@ log:
 downloader:
   workers: 4
   chunk_size: "5MB"
+  # 单个分片的最低瞬时速度，持续低于该值判定为长尾分片，主动中断并换连接重试。
+  # 默认 "32KB"（32KB/s），设为 "0" 可禁用该检测。
+  min_speed: "32KB"
+  # 单个分片允许的最长完全无新字节时间，超时判定为连接已死。
+  # 默认 "20s"，设为 "0" 可禁用该检测。
+  stall_timeout: "20s"
 
 registries:
   - id: "docker"

@@ -20,6 +20,9 @@ func newClient() *http.Client {
 			}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			// 响应头超时：连接建立成功后，如果对端迟迟不返回响应头（例如被中间设备静默挂起），
+			// 之前完全没有超时保护，会一直卡到外层 1 小时的总 Context 超时才会暴露问题。
+			ResponseHeaderTimeout: 20 * time.Second,
 
 			// 2. HTTP/2 禁用配置
 			// 关键：设置 TLSNextProto 为非 nil 的空 map，彻底禁用 HTTP/2 自动升级
