@@ -13,6 +13,9 @@ log:
 downloader:
   workers: 4
   chunk_size: "5MB"
+  min_speed: "32KB"
+  stall_timeout: "20s"
+  max_retries: 5
 
 cache:
   max_size: "10GB"
@@ -44,6 +47,9 @@ registries:
 downloader:
   workers: 4
   chunk_size: "5MB"
+  min_speed: "32KB"
+  stall_timeout: "20s"
+  max_retries: 5
 ```
 
 下面是 Gemini 给出的建议
@@ -90,6 +96,20 @@ downloader:
 `min_speed` 的合理值取决于你的实际带宽环境：默认的 32KB/s 是一个非常保守的下限（只用来兜底判断
 "这个分片基本等于停滞"），如果你的上游本身就比较慢，不需要调大它；但如果你所在环境普遍能跑到几
 MB/s，把它调到更接近正常速度的一部分（例如 200KB/s ~ 1MB/s）能更快地识别并淘汰长尾分片。
+
+### 5. 分片重试次数 (`max_retries`)
+
+单个分片下载失败（连接断开、HTTP 错误、长尾/卡顿检测主动取消）后，会换一个连接重试。
+`max_retries` 限制每个分片允许的失败重试次数，超过后整个下载任务失败。
+
+```yaml
+downloader:
+  max_retries: 5
+```
+
+- **默认值**: `5`
+- **未配置或 <=0**: 回退到默认值 5
+- **调优**: 上游不稳定时可适当增大；若希望尽快失败以便外层处理，可减小
 
 ## 镜像源配置
 

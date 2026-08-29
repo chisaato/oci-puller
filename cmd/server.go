@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,30 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+const (
+	internalCacheStatsPath = "/_oci_puller/internal/cache/stats"
+	internalCacheCleanPath = "/_oci_puller/internal/cache/clean"
+)
+
+type cacheStatsResponse struct {
+	CacheDir string              `json:"cache_dir"`
+	Stats    *manager.CacheStats `json:"stats"`
+}
+
+type cacheCleanRequest struct {
+	Count *int `json:"count,omitempty"`
+}
+
+type cacheCleanResponse struct {
+	CacheDir  string              `json:"cache_dir"`
+	Cleaned   int                 `json:"cleaned"`
+	Requested int                 `json:"requested"`
+	AutoCount int                 `json:"auto_count,omitempty"`
+	UsedAuto  bool                `json:"used_auto"`
+	Stats     *manager.CacheStats `json:"stats,omitempty"`
+	Message   string              `json:"message,omitempty"`
+}
 
 // serverCmd 代表 server 命令
 var serverCmd = &cobra.Command{
@@ -129,6 +154,16 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"path", r.URL.Path,
 		"remote", r.RemoteAddr,
 	)
+
+	if r.URL.Path == internalCacheStatsPath {
+		h.handleInternalCacheStats(w, r)
+		return
+	}
+
+	if r.URL.Path == internalCacheCleanPath {
+		h.handleInternalCacheClean(w, r)
+		return
+	}
 
 	// 1. 基于主机的路由
 	hostname := r.Host
@@ -238,6 +273,114 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	logger.S.Errorw("代理请求的所有上游都不可用", "host", hostname, "path", proxyPath)
 	http.Error(w, "上游服务不可用", http.StatusBadGateway)
+}
+
+func (h *ProxyHandler) handleInternalCacheStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "方法不被允许", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats, err := h.manager.GetCacheStats()
+	if err != nil {
+		logger.S.Errorw("获取内部缓存统计信息失败", "error", err)
+		http.Error(w, "获取缓存统计信息失败", http.StatusInternalServerError)
+		return
+	}
+
+	resp := cacheStatsResponse{
+		CacheDir: config.GlobalConfig.Server.CacheDir,
+		Stats:    stats,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.S.Warnw("写入内部缓存统计响应失败", "error", err)
+	}
+}
+
+func (h *ProxyHandler) handleInternalCacheClean(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "方法不被允许", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req cacheCleanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		logger.S.Warnw("解析内部缓存清理请求失败", "error", err)
+		http.Error(w, "请求体格式无效", http.StatusBadRequest)
+		return
+	}
+
+	count := 0
+	usedAuto := false
+	message := ""
+
+	if req.Count != nil {
+		if *req.Count <= 0 {
+			http.Error(w, "清理数量必须大于0", http.StatusBadRequest)
+			return
+		}
+		count = *req.Count
+	} else {
+		stats, err := h.manager.GetCacheStats()
+		if err != nil {
+			logger.S.Errorw("自动计算清理数量前获取缓存统计失败", "error", err)
+			http.Error(w, "获取缓存统计信息失败", http.StatusInternalServerError)
+			return
+		}
+
+		autoCount, needsCleanup := calculateAutoCleanCount(stats)
+		if !needsCleanup {
+			message = "缓存使用率正常，无需清理"
+			resp := cacheCleanResponse{
+				CacheDir:  config.GlobalConfig.Server.CacheDir,
+				Requested: 0,
+				AutoCount: autoCount,
+				UsedAuto:  true,
+				Stats:     stats,
+				Message:   message,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				logger.S.Warnw("写入内部缓存清理响应失败", "error", err)
+			}
+			return
+		}
+
+		count = autoCount
+		usedAuto = true
+	}
+
+	if err := h.manager.CleanupCache(count); err != nil {
+		logger.S.Errorw("执行内部缓存清理失败", "count", count, "error", err)
+		http.Error(w, "清理缓存失败", http.StatusInternalServerError)
+		return
+	}
+
+	stats, err := h.manager.GetCacheStats()
+	if err != nil {
+		logger.S.Warnw("内部缓存清理后获取统计失败", "error", err)
+	}
+
+	resp := cacheCleanResponse{
+		CacheDir:  config.GlobalConfig.Server.CacheDir,
+		Cleaned:   count,
+		Requested: count,
+		AutoCount: count,
+		UsedAuto:  usedAuto,
+		Stats:     stats,
+	}
+	if !usedAuto {
+		resp.AutoCount = 0
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.S.Warnw("写入内部缓存清理响应失败", "error", err)
+	}
 }
 
 func (h *ProxyHandler) handleManifestWithFailover(w http.ResponseWriter, r *http.Request, candidates []string, proxyPath, tag string) bool {

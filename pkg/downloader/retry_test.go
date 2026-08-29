@@ -96,3 +96,44 @@ func TestDownloader_Retry(t *testing.T) {
 		t.Errorf("Expected at least %d failures, got %d", maxFails, finalFailCount)
 	}
 }
+
+// TestDownloader_MaxRetriesHonored 验证 SetMaxRetries 会限制单个分片的失败重试次数。
+// 若 Start 仍使用硬编码 maxRetries=5，持续失败的分片会被尝试 6 次而不是 2 次。
+func TestDownloader_MaxRetriesHonored(t *testing.T) {
+	logger.Init("debug")
+
+	var attempts int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close()
+	}))
+	defer ts.Close()
+
+	tmpFile, err := os.CreateTemp("", "downloader_max_retries_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	mgr := interval.NewManager()
+	c := coordinator.NewCoordinator(tmpFile, 10, mgr, func() {}, "")
+
+	dl := New(ts.URL, tmpFile, c, nil)
+	dl.SetChunkSize(10)
+	dl.SetWorkers(1)
+	dl.SetMinSpeed(0)
+	dl.SetStallTimeout(0)
+	dl.SetMaxRetries(1)
+
+	err = dl.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected download to fail after exhausting retries")
+	}
+
+	got := atomic.LoadInt32(&attempts)
+	if got != 2 {
+		t.Errorf("expected 2 attempts (1 initial + 1 retry), got %d", got)
+	}
+}

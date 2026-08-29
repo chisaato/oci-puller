@@ -32,6 +32,7 @@ type Downloader struct {
 	minSpeedBytesPerSec int64         // 单个分片持续低于该速度视为长尾，0 表示禁用
 	stallTimeout        time.Duration // 单个分片完全无新字节的最长时间，0 表示禁用
 	speedCheckInterval  time.Duration // 速度采样窗口
+	maxRetries          int           // 单个分片失败后的最大重试次数
 
 	// Bitmap Scheduling
 	bitmap    *bitset.BitSet
@@ -56,6 +57,7 @@ func New(url string, f *os.File, c *coordinator.Coordinator, headers http.Header
 		minSpeedBytesPerSec: 32 * 1024, // 默认 32KB/s
 		stallTimeout:        20 * time.Second,
 		speedCheckInterval:  3 * time.Second,
+		maxRetries:          5,
 	}
 }
 
@@ -78,6 +80,11 @@ func (d *Downloader) SetMinSpeed(bytesPerSec int64) {
 // SetStallTimeout 设置单个分片允许的最长完全无新字节时间。0 表示禁用该检测。
 func (d *Downloader) SetStallTimeout(dur time.Duration) {
 	d.stallTimeout = dur
+}
+
+// SetMaxRetries 设置单个分片失败后的最大重试次数。
+func (d *Downloader) SetMaxRetries(n int) {
+	d.maxRetries = n
 }
 
 // Start 开始下载任务
@@ -148,7 +155,7 @@ func (d *Downloader) Start(ctx context.Context) error {
 					d.mu.Lock()
 					d.retries[idx]++
 					retryCount := d.retries[idx]
-					maxRetries := 5 // TODO: 配置文件化. 硬编码默认值，后续可配置
+					maxRetries := d.maxRetries
 					d.mu.Unlock()
 
 					if retryCount > maxRetries {

@@ -31,6 +31,7 @@ type DownloaderConfig struct {
 	ChunkSize    string `mapstructure:"chunk_size"`    // 分块大小 (如 10MB)
 	MinSpeed     string `mapstructure:"min_speed"`     // 单个分片的最低瞬时速度 (如 "32KB")，持续低于此值判定为长尾/卡顿。"0" 表示禁用
 	StallTimeout string `mapstructure:"stall_timeout"` // 单个分片允许的最长无进展时间 (如 "20s")，超时判定为连接已死
+	MaxRetries   int    `mapstructure:"max_retries"`   // 单个分片失败后的最大重试次数
 }
 
 type RegistryConfig struct {
@@ -157,6 +158,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Downloader.Workers <= 0 {
 		cfg.Downloader.Workers = 16
+	}
+	if cfg.Downloader.MaxRetries <= 0 {
+		cfg.Downloader.MaxRetries = 5
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"

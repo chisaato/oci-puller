@@ -26,6 +26,7 @@ type DownloadManager struct {
 	cacheDir string
 	active   sync.Map   // map[string]*coordinator.Coordinator (digest -> coordinator)
 	mu       sync.Mutex // 用于串行化创建过程，防止重复启动
+	cleanMu  sync.Mutex // 用于串行化手动清理与后台 GC，避免并发交叉
 	store    *storage.Store
 }
 
@@ -142,43 +143,16 @@ func (m *DownloadManager) CleanupCache(count int) error {
 	}
 
 	logger.S.Infow("开始手动缓存清理", "count", count)
-
-	evictedDigests, err := m.store.EvictOldest(count)
+	result, err := m.runCleanup("manual", cleanupOptions{count: count})
 	if err != nil {
-		return fmt.Errorf("从存储中驱逐项目失败: %w", err)
-	}
-
-	var freedSize int64
-	var actualDeleted int
-
-	// 删除实际的文件
-	for _, digest := range evictedDigests {
-		finalPath := m.getFinalPath(digest)
-		tempPath := m.getTempPath(digest)
-		metaPath := tempPath + ".meta"
-
-		// 获取文件大小用于统计
-		if info, err := os.Stat(finalPath); err == nil {
-			freedSize += info.Size()
-			actualDeleted++
-
-			// 删除文件
-			if err := os.Remove(finalPath); err != nil {
-				logger.S.Warnw("删除缓存文件失败", "path", finalPath, "error", err)
-			} else {
-				logger.S.Debugw("已删除缓存文件", "digest", digest, "path", finalPath)
-			}
-		}
-
-		// 清理可能的临时文件
-		os.Remove(tempPath)
-		os.Remove(metaPath)
+		return err
 	}
 
 	logger.S.Infow("手动缓存清理完成",
 		"requested", count,
-		"actualDeleted", actualDeleted,
-		"freedSize", freedSize)
+		"actualDeleted", result.deletedCount,
+		"freedSize", result.freedSize,
+		"skippedActive", result.skippedActive)
 
 	return nil
 }
@@ -236,65 +210,132 @@ func (m *DownloadManager) runGC() {
 
 	// 如果缓存大小超过限制，开始清理
 	if currentSize > maxSize {
-		// 计算需要清理的空间
 		needToFree := currentSize - maxSize + (maxSize / 10) // 多清理10%以避免频繁GC
-		var freedSize int64
-		var evictedCount int
 
 		logger.S.Infow("开始缓存清理",
 			"needToFree", needToFree,
 			"currentSize", currentSize,
 			"maxSize", maxSize)
 
-		// 每次清理最多10个最旧的项目
-		for freedSize < needToFree {
-			const batchSize = 10
-			evictedDigests, err := m.store.EvictOldest(batchSize)
-			if err != nil {
-				logger.S.Warnw("清理缓存项目失败", "error", err)
-				break
-			}
-
-			if len(evictedDigests) == 0 {
-				// 没有更多项目可以清理
-				break
-			}
-
-			// 删除实际的文件
-			for _, digest := range evictedDigests {
-				finalPath := m.getFinalPath(digest)
-				tempPath := m.getTempPath(digest)
-				metaPath := tempPath + ".meta"
-
-				// 获取文件大小用于统计
-				if info, err := os.Stat(finalPath); err == nil {
-					freedSize += info.Size()
-					evictedCount++
-
-					// 删除文件
-					if err := os.Remove(finalPath); err != nil {
-						logger.S.Warnw("删除缓存文件失败", "path", finalPath, "error", err)
-					} else {
-						logger.S.Debugw("已删除缓存文件", "digest", digest, "path", finalPath)
-					}
-				}
-
-				// 清理可能的临时文件
-				os.Remove(tempPath)
-				os.Remove(metaPath)
-			}
-
-			// 如果清理的项目太少，可能需要更大的批次
-			if len(evictedDigests) < batchSize {
-				break
-			}
+		result, err := m.runCleanup("gc", cleanupOptions{needToFree: needToFree, batchSize: 10})
+		if err != nil {
+			logger.S.Warnw("缓存清理失败", "error", err)
+			return
 		}
 
 		logger.S.Infow("缓存清理完成",
-			"freedSize", freedSize,
-			"evictedCount", evictedCount,
-			"newSize", currentSize-freedSize)
+			"freedSize", result.freedSize,
+			"evictedCount", result.deletedCount,
+			"skippedActive", result.skippedActive,
+			"newSize", currentSize-result.freedSize)
 	}
+}
+
+type cleanupOptions struct {
+	count      int
+	needToFree int64
+	batchSize  int
+}
+
+type cleanupResult struct {
+	freedSize     int64
+	deletedCount  int
+	skippedActive int
+}
+
+func (m *DownloadManager) runCleanup(reason string, opts cleanupOptions) (*cleanupResult, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("缓存存储系统未初始化")
+	}
+
+	m.cleanMu.Lock()
+	defer m.cleanMu.Unlock()
+
+	result := &cleanupResult{}
+	skipActive := m.snapshotActiveDigests()
+	result.skippedActive = len(skipActive)
+
+	if opts.count > 0 {
+		deleted, freedSize, err := m.evictBatch(opts.count, skipActive)
+		if err != nil {
+			return nil, fmt.Errorf("执行 %s 清理失败: %w", reason, err)
+		}
+		result.deletedCount = deleted
+		result.freedSize = freedSize
+		return result, nil
+	}
+
+	batchSize := opts.batchSize
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+
+	for result.freedSize < opts.needToFree {
+		deleted, freedSize, err := m.evictBatch(batchSize, skipActive)
+		if err != nil {
+			return nil, fmt.Errorf("执行 %s 清理失败: %w", reason, err)
+		}
+		if deleted == 0 {
+			break
+		}
+
+		result.deletedCount += deleted
+		result.freedSize += freedSize
+
+		if deleted < batchSize {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+func (m *DownloadManager) evictBatch(count int, skipActive map[string]struct{}) (int, int64, error) {
+	evictedDigests, err := m.store.EvictOldestExcept(count, skipActive)
+	if err != nil {
+		return 0, 0, fmt.Errorf("从存储中驱逐项目失败: %w", err)
+	}
+
+	var freedSize int64
+	var deletedCount int
+
+	for _, digest := range evictedDigests {
+		finalPath := m.getFinalPath(digest)
+		tempPath := m.getTempPath(digest)
+		metaPath := tempPath + ".meta"
+
+		if info, err := os.Stat(finalPath); err == nil {
+			freedSize += info.Size()
+			deletedCount++
+
+			if err := os.Remove(finalPath); err != nil {
+				logger.S.Warnw("删除缓存文件失败", "path", finalPath, "error", err)
+			} else {
+				logger.S.Debugw("已删除缓存文件", "digest", digest, "path", finalPath)
+			}
+		}
+
+		if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
+			logger.S.Warnw("删除临时文件失败", "path", tempPath, "error", err)
+		}
+		if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+			logger.S.Warnw("删除临时元数据文件失败", "path", metaPath, "error", err)
+		}
+	}
+
+	return deletedCount, freedSize, nil
+}
+
+func (m *DownloadManager) snapshotActiveDigests() map[string]struct{} {
+	activeDigests := make(map[string]struct{})
+	m.active.Range(func(key, value interface{}) bool {
+		digest, ok := key.(string)
+		if ok {
+			activeDigests[digest] = struct{}{}
+		}
+		return true
+	})
+	return activeDigests
 }
 
 // GetBlobStream 获取 Blob 的读取流
@@ -437,7 +478,7 @@ func (m *DownloadManager) startDownload(digest, url string, headers http.Header)
 	dl := downloader.New(url, f, coord, headers)
 
 	// 应用配置文件中的下载器参数（此前这里被硬编码值覆盖，config.yaml 中的
-	// workers/chunk_size/min_speed/stall_timeout 实际上从未生效）。
+	// workers/chunk_size/min_speed/stall_timeout/max_retries 实际上从未生效）。
 	if cfg := config.GlobalConfig; cfg != nil {
 		if cfg.Downloader.Workers > 0 {
 			dl.SetWorkers(cfg.Downloader.Workers)
@@ -456,6 +497,9 @@ func (m *DownloadManager) startDownload(digest, url string, headers http.Header)
 			dl.SetStallTimeout(stallTimeout)
 		} else {
 			logger.S.Warnw("解析 stall_timeout 配置失败，使用默认值", "error", err)
+		}
+		if cfg.Downloader.MaxRetries > 0 {
+			dl.SetMaxRetries(cfg.Downloader.MaxRetries)
 		}
 	}
 

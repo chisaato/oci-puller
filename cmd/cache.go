@@ -1,9 +1,15 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"oci-puller/pkg/config"
 	"oci-puller/pkg/logger"
@@ -47,12 +53,7 @@ func runCacheStats(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// 创建管理器
-	mgr := manager.NewManager(config.GlobalConfig.Server.CacheDir)
-	defer mgr.Close()
-
-	// 获取统计信息
-	stats, err := mgr.GetCacheStats()
+	stats, cacheDir, err := getCacheStats()
 	if err != nil {
 		fmt.Printf("获取缓存统计信息失败: %v\n", err)
 		os.Exit(1)
@@ -60,7 +61,7 @@ func runCacheStats(cmd *cobra.Command, args []string) {
 
 	// 格式化输出
 	fmt.Println("=== OCI Puller 缓存统计信息 ===")
-	fmt.Printf("缓存目录: %s\n", config.GlobalConfig.Server.CacheDir)
+	fmt.Printf("缓存目录: %s\n", cacheDir)
 	fmt.Printf("总大小: %.2f GB\n", float64(stats.TotalSize)/(1024*1024*1024))
 	fmt.Printf("最大大小: %.2f GB\n", float64(stats.MaxSize)/(1024*1024*1024))
 	fmt.Printf("使用率: %.1f%%\n", stats.UsagePercent)
@@ -74,6 +75,91 @@ func runCacheStats(cmd *cobra.Command, args []string) {
 	}
 }
 
+func getCacheStats() (*manager.CacheStats, string, error) {
+	stats, cacheDir, err := getCacheStatsFromServer()
+	if err == nil {
+		return stats, cacheDir, nil
+	}
+
+	logger.S.Debugw("通过运行中服务获取缓存统计失败，回退到本地读取", "error", err)
+	return getCacheStatsLocal()
+}
+
+func getCacheStatsFromServer() (*manager.CacheStats, string, error) {
+	serverURL, err := buildInternalServerURL(config.GlobalConfig.Server.Addr)
+	if err != nil {
+		return nil, "", err
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(serverURL + internalCacheStatsPath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("服务返回状态码 %d", resp.StatusCode)
+	}
+
+	var payload cacheStatsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, "", fmt.Errorf("解析服务响应失败: %w", err)
+	}
+	if payload.Stats == nil {
+		return nil, "", fmt.Errorf("服务响应缺少缓存统计信息")
+	}
+
+	cacheDir := payload.CacheDir
+	if cacheDir == "" {
+		cacheDir = config.GlobalConfig.Server.CacheDir
+	}
+
+	return payload.Stats, cacheDir, nil
+}
+
+func getCacheStatsLocal() (*manager.CacheStats, string, error) {
+	mgr := manager.NewManager(config.GlobalConfig.Server.CacheDir)
+	defer mgr.Close()
+
+	stats, err := mgr.GetCacheStats()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return stats, config.GlobalConfig.Server.CacheDir, nil
+}
+
+func buildInternalServerURL(addr string) (string, error) {
+	trimmedAddr := strings.TrimSpace(addr)
+	if trimmedAddr == "" {
+		trimmedAddr = config.GlobalConfig.Server.Addr
+	}
+
+	if strings.HasPrefix(trimmedAddr, "http://") || strings.HasPrefix(trimmedAddr, "https://") {
+		return strings.TrimRight(trimmedAddr, "/"), nil
+	}
+
+	host, port, err := net.SplitHostPort(trimmedAddr)
+	if err != nil {
+		if strings.HasPrefix(trimmedAddr, ":") {
+			host = ""
+			port = strings.TrimPrefix(trimmedAddr, ":")
+		} else {
+			return "", fmt.Errorf("解析服务地址失败: %w", err)
+		}
+	}
+
+	if port == "" {
+		return "", fmt.Errorf("服务地址缺少端口: %s", trimmedAddr)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+
+	return fmt.Sprintf("http://%s:%s", host, port), nil
+}
+
 func runCacheClean(cmd *cobra.Command, args []string) {
 	// 初始化配置和日志
 	if err := initConfigForCache(); err != nil {
@@ -81,12 +167,9 @@ func runCacheClean(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// 创建管理器
-	mgr := manager.NewManager(config.GlobalConfig.Server.CacheDir)
-	defer mgr.Close()
-
 	var count int
 	var err error
+	useAutoCount := len(args) == 0
 
 	if len(args) > 0 {
 		// 用户指定了清理数量
@@ -95,58 +178,144 @@ func runCacheClean(cmd *cobra.Command, args []string) {
 			fmt.Printf("无效的清理数量: %s (必须是正整数)\n", args[0])
 			os.Exit(1)
 		}
-	} else {
-		// 自动计算需要清理的数量
-		stats, err := mgr.GetCacheStats()
-		if err != nil {
-			fmt.Printf("获取缓存统计信息失败: %v\n", err)
-			os.Exit(1)
-		}
-
-		if stats.UsagePercent < 90 {
-			fmt.Println("缓存使用率正常，无需清理")
-			return
-		}
-
-		// 计算需要清理的数量以使使用率降到90%以下
-		targetSize := int64(float64(stats.MaxSize) * 0.9)
-		if stats.TotalSize <= targetSize {
-			fmt.Println("缓存使用率正常，无需清理")
-			return
-		}
-
-		needToFree := stats.TotalSize - targetSize
-		// 假设平均每个项目的大小
-		avgSize := stats.TotalSize / int64(stats.BlobCount)
-		if avgSize == 0 {
-			count = 10 // 默认清理10个
-		} else {
-			count = int(needToFree / avgSize)
-			if count < 1 {
-				count = 1
-			}
-			if count > 100 {
-				count = 100 // 最多清理100个
-			}
-		}
-
-		fmt.Printf("自动计算需要清理 %d 个项目\n", count)
 	}
 
-	// 执行清理
-	fmt.Printf("正在清理 %d 个最旧的缓存项目...\n", count)
-	if err := mgr.CleanupCache(count); err != nil {
+	if err := runCacheCleanWithFallback(count, useAutoCount); err != nil {
 		fmt.Printf("清理缓存失败: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func runCacheCleanWithFallback(count int, useAutoCount bool) error {
+	if err := runCacheCleanFromServer(count, useAutoCount); err == nil {
+		return nil
+	} else {
+		logger.S.Debugw("通过运行中服务清理缓存失败，回退到本地执行", "error", err)
+	}
+
+	return runCacheCleanLocal(count, useAutoCount)
+}
+
+func runCacheCleanFromServer(count int, useAutoCount bool) error {
+	serverURL, err := buildInternalServerURL(config.GlobalConfig.Server.Addr)
+	if err != nil {
+		return err
+	}
+
+	var payload cacheCleanRequest
+	if !useAutoCount {
+		payload.Count = &count
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("序列化清理请求失败: %w", err)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(serverURL+internalCacheCleanPath, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("服务返回状态码 %d", resp.StatusCode)
+	}
+
+	var result cacheCleanResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("解析服务响应失败: %w", err)
+	}
+
+	if result.Message != "" {
+		fmt.Println(result.Message)
+		return nil
+	}
+
+	actualCount := result.Requested
+	if result.UsedAuto {
+		fmt.Printf("自动计算需要清理 %d 个项目\n", result.AutoCount)
+		actualCount = result.AutoCount
+	}
+
+	fmt.Printf("正在清理 %d 个最旧的缓存项目...\n", actualCount)
+	fmt.Println("缓存清理完成")
+	if result.Stats != nil {
+		fmt.Printf("清理后使用率: %.1f%%\n", result.Stats.UsagePercent)
+	}
+
+	return nil
+}
+
+func runCacheCleanLocal(count int, useAutoCount bool) error {
+	mgr := manager.NewManager(config.GlobalConfig.Server.CacheDir)
+	defer mgr.Close()
+
+	actualCount := count
+	if useAutoCount {
+		stats, err := mgr.GetCacheStats()
+		if err != nil {
+			return fmt.Errorf("获取缓存统计信息失败: %w", err)
+		}
+
+		autoCount, needsCleanup := calculateAutoCleanCount(stats)
+		if !needsCleanup {
+			fmt.Println("缓存使用率正常，无需清理")
+			return nil
+		}
+
+		actualCount = autoCount
+		fmt.Printf("自动计算需要清理 %d 个项目\n", actualCount)
+	}
+
+	fmt.Printf("正在清理 %d 个最旧的缓存项目...\n", actualCount)
+	if err := mgr.CleanupCache(actualCount); err != nil {
+		return err
 	}
 
 	fmt.Println("缓存清理完成")
 
-	// 显示清理后的统计信息
 	stats, err := mgr.GetCacheStats()
 	if err == nil {
 		fmt.Printf("清理后使用率: %.1f%%\n", stats.UsagePercent)
 	}
+
+	return nil
+}
+
+func calculateAutoCleanCount(stats *manager.CacheStats) (int, bool) {
+	if stats == nil || stats.UsagePercent < 90 {
+		return 0, false
+	}
+
+	targetSize := int64(float64(stats.MaxSize) * 0.9)
+	if stats.TotalSize <= targetSize {
+		return 0, false
+	}
+
+	needToFree := stats.TotalSize - targetSize
+	if stats.BlobCount <= 0 || stats.TotalSize <= 0 {
+		return 10, true
+	}
+
+	avgSize := stats.TotalSize / int64(stats.BlobCount)
+	if avgSize <= 0 {
+		return 10, true
+	}
+
+	count := int(needToFree / avgSize)
+	if needToFree%avgSize != 0 {
+		count++
+	}
+	if count < 1 {
+		count = 1
+	}
+	if count > 100 {
+		count = 100
+	}
+
+	return count, true
 }
 
 func initConfigForCache() error {

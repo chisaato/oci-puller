@@ -145,6 +145,11 @@ func (s *Store) GetAndTouch(digest string) (*BlobMeta, error) {
 // 但通常 Prune 需要知道当前的占用情况。
 // 目前，我们先实现 EvictOldest(n) 来驱逐最旧的 N 项。
 func (s *Store) EvictOldest(n int) ([]string, error) {
+	return s.EvictOldestExcept(n, nil)
+}
+
+// EvictOldestExcept 删除最旧的 N 个 Blob，但会跳过 skip 中的 digest。
+func (s *Store) EvictOldestExcept(n int, skip map[string]struct{}) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -158,6 +163,9 @@ func (s *Store) EvictOldest(n int) ([]string, error) {
 		count := 0
 		for k, v := c.First(); k != nil && count < n; k, v = c.Next() {
 			digest := string(v)
+			if _, shouldSkip := skip[digest]; shouldSkip {
+				continue
+			}
 
 			// 获取元数据以返回路径（以便调用者可以删除文件）
 			// 等等，调用者需要路径。
